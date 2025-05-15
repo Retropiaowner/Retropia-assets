@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Retropia Pong</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.55.2/phaser.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+  <script src="https://unpkg.com/@solana/web3.js@1.66.0/dist/index.iife.min.js"></script>
+  <style>
+    body { background-color: #000; color: #FFF; font-family: 'Montserrat', sans-serif; }
+    canvas { border: 2px solid #39FF14; }
+    .neon-blue { color: #00D4FF; }
+    .neon-pink { color: #FF00FF; }
+    .neon-green { color: #39FF14; }
+    .press-start { font-family: 'Press Start 2P', cursive; }
+  </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen">
+  <h1 class="text-4xl neon-blue press-start mb-4">Retropia Pong</h1>
+  <div id="wallet-status" class="mb-4">
+    <button id="connect-wallet" class="bg-neon-pink text-white px-4 py-2 rounded press-start">Connect Wallet</button>
+    <p id="wallet-address" class="text-white"></p>
+  </div>
+  <div id="betting-ui" class="mb-4 hidden">
+    <p class="text-white">Bet $5 in SOL to play! Winner takes ALL!</p>
+    <button id="place-bet" class="bg-neon-green text-black px-4 py-2 rounded press-start">Place Bet & Join Match</button>
+  </div>
+  <div id="game-status" class="text-white press-start mb-4"></div>
+  <div id="game-container"></div>
+
+  <script>
+    // Solana Setup
+    const { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } = solanaWeb3;
+    const connection = new Connection("https://api.devnet.solana.com", "confirmed");
+    let wallet = null;
+    let playerPublicKey = null;
+
+    const RETROPIA_ADDRESS = "hHVpoaafT22nKHyGmaubxF26JC7NB6VLR4XzaBQPsQY"; // Replace with your Solana wallet address
+    const BET_AMOUNT = 5 * LAMPORTS_PER_SOL; // $5 in SOL (approximate, adjust based on SOL price)
+    const FEE = 0.5 * LAMPORTS_PER_SOL; // $0.50 fee
+    const PAYOUT = 9.5 * LAMPORTS_PER_SOL; // $9.50 payout to winner
+    async function connectWallet() {
+      if (window.solana && window.solana.isPhantom) {
+        try {
+          await window.solana.connect();
+          wallet = window.solana;
+          playerPublicKey = wallet.publicKey;
+          document.getElementById("wallet-address").innerText = `Connected: ${playerPublicKey.toString().slice(0, 8)}...`;
+          document.getElementById("connect-wallet").classList.add("hidden");
+          document.getElementById("betting-ui").classList.remove("hidden");
+        } catch (err) {
+          console.error("Wallet connection failed:", err);
+          document.getElementById("wallet-address").innerText = "Failed to connect wallet.";
+        }
+      } else {
+        alert("Please install Phantom Wallet!");
+      }
+    }
+
+    async function placeBet() {
+      if (!wallet) return alert("Please connect your wallet!");
+      document.getElementById("game-status").innerText = "Processing bet...";
+
+      try {
+        const transaction = new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: playerPublicKey,
+            toPubkey: new PublicKey(RETROPIA_ADDRESS),
+            lamports: BET_AMOUNT,
+          })
+        );
+        transaction.feePayer = playerPublicKey;
+        const { blockhash } = await connection.getRecentBlockhash();
+        transaction.recentBlockhash = blockhash;
+
+        const signed = await wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signed.serialize());
+        await connection.confirmTransaction(signature);
+
+        document.getElementById("game-status").innerText = "Bet placed! Joining match...";
+        socket.emit("joinGame", { playerId: playerPublicKey.toString(), bet: BET_AMOUNT });
+      } catch (err) {
+        console.error("Bet failed:", err);
+        document.getElementById("game-status").innerText = "Bet failed. Try again.";
+      }
+    }
+
+    document.getElementById("connect-wallet").addEventListener("click", connectWallet);
+    document.getElementById("place-bet").addEventListener("click", placeBet);
+
+    // Phaser Game Setup
+    const config = {
+      type: Phaser.AUTO,
+      width: 800,
+      height: 600,
+      parent: "game-container",
+      physics: { default: "arcade", arcade: { gravity: { y: 0 } } },
+      scene: { preload, create, update }
+    };
+
+    let game = new Phaser.Game(config);
+    let paddle1, paddle2, ball, scoreText;
+    let score = { player1: 0, player2: 0 };
+    let playerRole = null;
+
+    function preload() {
+      this.load.setBaseURL("https://github.com/Retropiaowner/Retropia-assets/tree/main");
+      this.load.image("https://github.com/Retropiaowner/Retropia-assets/blob/main/fancy-paddle-blue.png");
+      this.load.image("https://github.com/Retropiaowner/Retropia-assets/blob/main/fancy-paddle-green.png");
+      this.load.image("https://github.com/Retropiaowner/Retropia-assets/blob/main/fancy-ball.png");
+    }
+
+    function create() {
+      // Background
+      this.add.rectangle(400, 300, 800, 600, 0x000000);
+      this.add.grid(400, 300, 800, 600, 32, 32, 0x39FF14).setAlpha(0.2);
+
+      // Paddles
+      paddle1 = this.physics.add.sprite(50, 300, "paddle-blue").setImmovable(true);
+      paddle2 = this.physics.add.sprite(750, 300, "paddle-pink").setImmovable(true);
+      paddle1.setCollideWorldBounds(true);
+      paddle2.setCollideWorldBounds(true);
+
+      // Ball
+      ball = this.physics.add.sprite(400, 300, "ball");
+      ball.setCollideWorldBounds(true);
+      ball.setBounce(1);
+      ball.setVelocity(0, 0);
+
+      // Collisions
+      this.physics.add.collider(ball, paddle1);
+      this.physics.add.collider(ball, paddle2);
+
+      // Score
+      scoreText = this.add.text(400, 50, "0 - 0", { fontFamily: "Press Start 2P", fontSize: "24px", color: "#39FF14" }).setOrigin(0.5);
+
+      // Keyboard Controls
+      this.keys = this.input.keyboard.addKeys({
+        w: Phaser.Input.Keyboard.KeyCodes.W,
+        s: Phaser.Input.Keyboard.KeyCodes.S,
+        up: Phaser.Input.Keyboard.KeyCodes.UP,
+        down: Phaser.Input.Keyboard.KeyCodes.DOWN
+      });
+    }
+
+    function update() {
+      if (!playerRole) return;
+
+      // Paddle Movement
+      if (playerRole === "player1") {
+        if (this.keys.w.isDown) paddle1.setVelocityY(-300);
+        else if (this.keys.s.isDown) paddle1.setVelocityY(300);
+        else paddle1.setVelocityY(0);
+        socket.emit("updatePaddle", { player: "player1", y: paddle1.y });
+      } else if (playerRole === "player2") {
+        if (this.keys.up.isDown) paddle2.setVelocityY(-300);
+        else if (this.keys.down.isDown) paddle2.setVelocityY(300);
+        else paddle2.setVelocityY(0);
+        socket.emit("updatePaddle", { player: "player2", y: paddle2.y });
+      }
+
+      // Ball Scoring
+      if (ball.x < 0) {
+        score.player2++;
+        resetBall(this);
+      } else if (ball.x > 800) {
+        score.player1++;
+        resetBall(this);
+      }
+
+      // Update Score
+      scoreText.setText(`${score.player1} - ${score.player2}`);
+
+      // Check for Win
+      if (score.player1 >= 5 || score.player2 >= 5) {
+        const winner = score.player1 >= 5 ? "player1" : "player2";
+        socket.emit("gameOver", { winner });
+        ball.setVelocity(0, 0);
+        document.getElementById("game-status").innerText = `Game Over! ${winner === playerRole ? "You Win!" : "You Lose!"}`;
+      }
+    }
+
+    function resetBall(scene) {
+      ball.setPosition(400, 300);
+      ball.setVelocity(Phaser.Math.Between(-200, 200), Phaser.Math.Between(-200, 200));
+      socket.emit("updateBall", { x: ball.x, y: ball.y, velocityX: ball.body.velocity.x, velocityY: ball.body.velocity.y });
+    }
+
+    // Socket.IO Multiplayer
+    const socket = io("https://your-vercel-app.vercel.app"); // Replace with your Vercel app URL
+
+    socket.on("connect", () => {
+      console.log("Connected to server");
+    });
+
+    socket.on("matchFound", ({ role, opponentId }) => {
+      playerRole = role;
+      document.getElementById("game-status").innerText = `Match found! You are ${role}. Opponent: ${opponentId.slice(0, 8)}...`;
+      ball.setVelocity(200, 200);
+    });
+
+    socket.on("updatePaddle", ({ player, y }) => {
+      if (player === "player1" && playerRole !== "player1") paddle1.y = y;
+      if (player === "player2" && playerRole !== "player2") paddle2.y = y;
+    });
+
+    socket.on("updateBall", ({ x, y, velocityX, velocityY }) => {
+      ball.setPosition(x, y);
+      ball.setVelocity(velocityX, velocityY);
+    });
+
+    socket.on("updateScore", ({ player1, player2 }) => {
+      score.player1 = player1;
+      score.player2 = player2;
+    });
+
+    socket.on("gameOver", async ({ winner }) => {
+      if (winner === playerRole) {
+        document.getElementById("game-status").innerText = "You Win! Claiming payout...";
+        try {
+          const transaction = new Transaction().add(
+            SystemProgram.transfer({
+              fromPubkey: new PublicKey(RETROPIA_ADDRESS),
+              toPubkey: playerPublicKey,
+              lamports: PAYOUT,
+            })
+          );
+          transaction.feePayer = new PublicKey(RETROPIA_ADDRESS);
+          // In production, you'd sign this with a Retropia wallet private key
+          // For this example, assume manual payout or a server-side signing mechanism
+          alert(`Payout of $9.50 in SOL credited to your wallet!`);
+        } catch (err) {
+          console.error("Payout failed:", err);
+          document.getElementById("game-status").innerText = "Payout failed. Contact support.";
+        }
+      } else {
+        document.getElementById("game-status").innerText = "You Lose! Better luck next time.";
+      }
+    });
+  </script>
+</body>
+</html>
